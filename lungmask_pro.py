@@ -4,7 +4,6 @@ import numpy as np
 from skimage.morphology import disk, binary_erosion, binary_closing, remove_small_holes, remove_small_objects
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import regionprops, label
-from image_functions import *
 from sklearn.cluster import KMeans
 from skimage import morphology, measure
 from scipy.ndimage.filters import median_filter
@@ -12,15 +11,36 @@ from skimage.filters import rank, threshold_otsu
 from pytictoc import TicToc
 from scipy.ndimage.interpolation import zoom
 import os, sys
-from mayavi import mlab
 from cv2 import Canny, bilateralFilter, medianBlur, resize, dilate, erode, bitwise_not
 
 
-# Function that segments the lung in a 2D-image
+'''
+A set of functions relevant for lungmask. Both 2D and 3D. Also includes a scaling function to set dynamic (intensity) range 
+to standard [0, 255] -> 8bit.
+NB: Handle with caution. Was just made for testing and to achieve a simple and fast lungmask for 3D-data, where
+accuracy in segmentation wasn't the main goal.
+------------------------------------------------------------------------------------------------------------
+Made by: André Pedersen
+e-mail : ape107@post.uit.no
+'''
+
+
+# function which scales the image to standard 8-bit intensity range
+# -> assumes numpy input, and returns input if single-values array input
+def maxminscale(tmp):
+	if (len(np.unique(tmp)) > 1):
+		tmp = tmp - np.amin(tmp)
+		tmp = 255/np.amax(tmp)*tmp
+	return tmp
+
+
+# Function that segments the lung in a 2D-image. Returns binary 2D-mask
 # --- INPUT ---
 # img : 2D numpy array
+# morph : bool, whether or not to apply morphological step to include juxta-pleural nodules
 # --- OUTPUT ---
 # lungmask : binary numpy array where 1 correspond to lung, 0 else
+## NB: Will also mask bladder for instance, so if you want to use this in 3D, you should use lungmask3D instead
 def lungmask_pro(img, morph = True):
 
 	# to avoid many tears
@@ -72,15 +92,16 @@ def lungmask_pro(img, morph = True):
 	res2 = remove_small_objects(label(res).astype(bool), min_size=800)
 	res2[res2 > 0] = 1
 
-	# separate each object in image (i.e. each lung part), and do morphology to include juxta-vascular nodules
+	# separate each object in image (i.e. each lung part), and do morphology to include juxta-pleural nodules
 	lungmask = np.zeros(res2.shape)
 	labels = label(res2)
 	for i in range(1,len(np.unique(labels))):
 		tmp = np.zeros(labels.shape)
 		tmp[labels == i] = 1
 
+		# whether or not to apply morphology to fix lung boundary -> to include juxta-pleural nodules (nodules attached to lung boundary)
 		if (morph == True):
-			mask = dilate(np.uint8(tmp), disk(17))
+			mask = dilate(np.uint8(tmp), disk(17)) # 17 : radius of 2D-disk
 			mask = remove_small_objects(label(bitwise_not(maxminscale(mask))).astype(bool), min_size = 500).astype(int)
 			mask[mask != 0] = -1
 			mask = np.add(mask, np.ones(mask.shape))
@@ -96,11 +117,13 @@ def lungmask_pro(img, morph = True):
 
 
 
-# Function that masks out the lung on a 3D-image stack.
+# Function that masks the lung lung on a 3D-image stack. Returns binary 3D mask
 # --- INPUT ---
 # data : 3D-numpy array with dimensions (slice, (img x,y))
+# morph : bool, whether or not to apply morphological step to include juxta-pleural nodules
 # --- OUTPUT ---
 # res  : binary 3D-numpy array where 1 correspond to lung, 0 else
+## NB: Useless without 2D-lungmask, since uses it to segment
 def lungmask3D(data, morph = True):
 
 	# to avoid many tears
@@ -115,64 +138,6 @@ def lungmask3D(data, morph = True):
 	res[res > 0] = 1
 
 	return res
-
-
-
-# --- something something text text ---
-def plot_lung_and_tumor(im_st1, pred_st1, gt_st1, thr = 0.5):
-
-	# measure time
-	t = TicToc()
-
-	# segment the lung from the 3D-stack
-	print('lungmask...', end="\r")
-	mask1 = lungmask3D(im_st1)
-
-	# need to resize arrays to make plotting faster
-	print('resizing...', end="\r")
-	mask = np.zeros((im_st1.shape[0], 256, 256))
-	pred_st = mask.copy()
-	gt_st = mask.copy()
-
-	for i in range(im_st1.shape[0]):
-		mask[i,:,:] = resize(mask1[i,:,:].astype(float), (256,256))
-		pred_st[i,:,:] = resize(pred_st1[i,:,:].astype(float), (256,256))
-		gt_st[i,:,:] = resize(gt_st1[i,:,:].astype(float), (256,256))
-
-	# get appropriate edge structure around object (surface), for easier & faster plotting
-	for i in range(mask.shape[1]):
-		mask[:, i, :] = Canny(np.uint8(maxminscale(mask[:, i, :])),50,100)
-		#pred_st[:, i, :] = Canny(np.uint8(maxminscale(pred_st[:, i, :])),50,100)
-
-	# apply thresholding to get appropriate plots
-	pred_st[pred_st < thr] = 0
-	pred_st[pred_st >= thr] = 180
-	gt_st[gt_st >= thr] = 180    
-
-	# TODO - make zoom_fac dependent on resolution in z dir (true values)
-	zoom_fac = mask.shape[1]/mask.shape[0]
-
-	print('zoom...', end="\r")
-	mask = zoom(mask, zoom = [zoom_fac,1,1])
-	pred_st = zoom(pred_st, zoom = [zoom_fac,1,1])
-	gt_st = zoom(gt_st, zoom = [zoom_fac,1,1])
-
-	t.tic()
-	print('drawing...', end="\r")
-	mlab.figure(1, size = (1000,800))
-	mlab.contour3d(pred_st, colormap = 'hot', opacity = 1.0, vmin = 0, vmax = 255)
-	mlab.contour3d(mask, colormap = 'Greys', opacity = 0.1, vmin = 0, vmax = 150)
-	mlab.title('Prediction')
-
-	mlab.figure(2, size = (1000,800))
-	mlab.contour3d(gt_st, colormap = 'hot', opacity = 1.0, vmin = 0, vmax = 255)
-	mlab.contour3d(mask, colormap = 'Greys', opacity = 0.1, vmin = 0, vmax = 150)
-	mlab.title('Ground truth')
-	t.toc()
-
-	mlab.show()
-
-
 
 
 
